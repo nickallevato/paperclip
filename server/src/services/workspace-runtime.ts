@@ -567,6 +567,51 @@ async function resolveGitOwnerRepoRoot(cwd: string): Promise<string> {
   return path.dirname(path.resolve(checkoutRoot, commonDir));
 }
 
+async function ensureGitOwnerRepoRootForExecutionWorkspace(input: {
+  baseCwd: string;
+  repoUrl: string | null;
+  recorder?: WorkspaceOperationRecorder | null;
+}): Promise<string> {
+  const existingRepoRoot = await resolveGitOwnerRepoRoot(input.baseCwd).catch((error) => error);
+  if (!(existingRepoRoot instanceof Error)) {
+    return existingRepoRoot;
+  }
+
+  const repoUrl = input.repoUrl?.trim();
+  if (!repoUrl) {
+    throw existingRepoRoot;
+  }
+
+  const baseCwd = path.resolve(input.baseCwd);
+  const parentDir = path.dirname(baseCwd);
+  const stat = await fs.stat(baseCwd).catch(() => null);
+  if (stat && !stat.isDirectory()) {
+    throw existingRepoRoot;
+  }
+  if (stat) {
+    const entries = await fs.readdir(baseCwd).catch(() => []);
+    if (entries.length > 0) {
+      throw existingRepoRoot;
+    }
+  }
+
+  await fs.mkdir(parentDir, { recursive: true });
+  await recordGitOperation(input.recorder, {
+    phase: "worktree_prepare",
+    args: ["clone", repoUrl, baseCwd],
+    cwd: parentDir,
+    metadata: {
+      repoUrl,
+      baseCwd,
+      provisionedBaseCheckout: true,
+    },
+    successMessage: `Prepared managed git checkout at ${baseCwd}\n`,
+    failureLabel: `git clone ${repoUrl} ${baseCwd}`,
+  });
+
+  return await resolveGitOwnerRepoRoot(baseCwd);
+}
+
 async function findRegisteredGitWorktreeByBranch(repoRoot: string, branchName: string): Promise<string | null> {
   const raw = await runGit(["worktree", "list", "--porcelain"], repoRoot).catch(() => null);
   if (!raw) return null;
@@ -999,7 +1044,11 @@ export async function realizeExecutionWorkspace(input: {
     };
   }
 
-  const repoRoot = await resolveGitOwnerRepoRoot(input.base.baseCwd);
+  const repoRoot = await ensureGitOwnerRepoRootForExecutionWorkspace({
+    baseCwd: input.base.baseCwd,
+    repoUrl: input.base.repoUrl,
+    recorder: input.recorder ?? null,
+  });
   const branchTemplate = asString(rawStrategy.branchTemplate, "{{issue.identifier}}-{{slug}}");
   const renderedBranch = renderWorkspaceTemplate(branchTemplate, {
     issue: input.issue,

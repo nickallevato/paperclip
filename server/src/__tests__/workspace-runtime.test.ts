@@ -62,6 +62,10 @@ async function runGit(cwd: string, args: string[]) {
   await execFileAsync("git", args, { cwd });
 }
 
+async function readGit(cwd: string, args: string[]) {
+  return (await execFileAsync("git", args, { cwd })).stdout.trim();
+}
+
 async function runPnpm(cwd: string, args: string[]) {
   await execFileAsync("pnpm", args, { cwd });
 }
@@ -370,6 +374,50 @@ describe("realizeExecutionWorkspace", () => {
     expect(second.created).toBe(false);
     expect(second.cwd).toBe(first.cwd);
     expect(second.branchName).toBe(first.branchName);
+  });
+
+  it("clones a missing managed base checkout before creating a git worktree", async () => {
+    const sourceRepo = await createTempRepo();
+    const remoteDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-managed-remote-"));
+    const remotePath = path.join(remoteDir, "paperclip.git");
+    await execFileAsync("git", ["clone", "--bare", sourceRepo, remotePath]);
+    const managedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-managed-base-"));
+    const managedCheckout = path.join(managedRoot, "paperclip");
+
+    const workspace = await realizeExecutionWorkspace({
+      base: {
+        baseCwd: managedCheckout,
+        source: "project_primary",
+        projectId: "project-1",
+        workspaceId: "workspace-1",
+        repoUrl: remotePath,
+        repoRef: "HEAD",
+      },
+      config: {
+        workspaceStrategy: {
+          type: "git_worktree",
+          branchTemplate: "{{issue.identifier}}-{{slug}}",
+        },
+      },
+      issue: {
+        id: "issue-1",
+        identifier: "PAP-448",
+        title: "Provision managed checkout",
+      },
+      agent: {
+        id: "agent-1",
+        name: "Codex Coder",
+        companyId: "company-1",
+      },
+    });
+
+    expect(workspace.strategy).toBe("git_worktree");
+    expect(workspace.created).toBe(true);
+    expect(workspace.cwd).not.toBe(managedCheckout);
+    expect(workspace.cwd).toBe(path.join(managedCheckout, ".paperclip", "worktrees", "PAP-448-provision-managed-checkout"));
+    await expect(fs.stat(path.join(managedCheckout, ".git"))).resolves.toBeTruthy();
+    await expect(fs.stat(path.join(workspace.cwd, ".git"))).resolves.toBeTruthy();
+    await expect(readGit(managedCheckout, ["remote", "get-url", "origin"])).resolves.toBe(remotePath);
   });
 
   it("rejects reusing an empty directory that only looks like a worktree because it sits inside the repo", async () => {
