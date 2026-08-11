@@ -924,8 +924,11 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
   async function hasPersistedDurableWaitPath(issue: typeof issues.$inferSelect) {
     if (issue.monitorNextCheckAt) return true;
 
+    // An armed watchdog only counts as a durable wait path when something can
+    // actually fire it. A watchdog whose agent is paused/terminated/awaiting
+    // approval will never run, so it must not suppress stranded-issue recovery.
     const armedWatchdog = await db
-      .select({ id: issueWatchdogs.id })
+      .select({ id: issueWatchdogs.id, watchdogAgentId: issueWatchdogs.watchdogAgentId })
       .from(issueWatchdogs)
       .where(
         and(
@@ -935,8 +938,15 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         ),
       )
       .limit(1)
-      .then((rows) => Boolean(rows[0]));
-    if (armedWatchdog) return true;
+      .then((rows) => rows[0] ?? null);
+    if (armedWatchdog) {
+      const watchdogAgent = await getAgent(armedWatchdog.watchdogAgentId);
+      if (
+        watchdogAgent &&
+        watchdogAgent.companyId === issue.companyId &&
+        await isAgentInvokable(watchdogAgent)
+      ) return true;
+    }
 
     return db
       .select({ id: issueRelations.issueId })

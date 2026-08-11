@@ -7630,6 +7630,40 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(runs).toHaveLength(1);
   });
 
+  it("does not accept an armed watchdog whose agent can never run it", async () => {
+    const { agentId, issueId, companyId } = await seedStrandedIssueFixture({
+      status: "in_progress",
+      runStatus: "succeeded",
+      livenessState: "advanced",
+      resultJson: { summary: "Parked on a watchdog whose agent was later terminated." },
+    });
+    const deadAgentId = randomUUID();
+    await db.insert(agents).values({
+      id: deadAgentId,
+      companyId,
+      name: "RetiredWatcher",
+      role: "engineer",
+      status: "terminated",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } },
+      permissions: {},
+    });
+    await db.insert(issueWatchdogs).values({
+      companyId,
+      issueId,
+      watchdogAgentId: deadAgentId,
+      instructions: "Nothing can fire this.",
+      status: "active",
+    });
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reconcileStrandedAssignedIssues();
+    expect(result.continuationRequeued).toBe(1);
+    expect(result.issueIds).toEqual([issueId]);
+    expect(agentId).toBeTruthy();
+  });
+
   it("preserves a delegated blocker edge as the durable external-wait path", async () => {
     const { companyId, agentId, issueId } = await seedStrandedIssueFixture({
       status: "in_progress",
