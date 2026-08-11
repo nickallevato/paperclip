@@ -26,6 +26,7 @@ import {
   issueRecoveryActions,
   issueRelations,
   issueThreadInteractions,
+  issueWatchdogs,
   issues,
 } from "@paperclipai/db";
 import { parseObject, asBoolean, asNumber } from "../../adapters/utils.js";
@@ -922,6 +923,20 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
 
   async function hasPersistedDurableWaitPath(issue: typeof issues.$inferSelect) {
     if (issue.monitorNextCheckAt) return true;
+
+    const armedWatchdog = await db
+      .select({ id: issueWatchdogs.id })
+      .from(issueWatchdogs)
+      .where(
+        and(
+          eq(issueWatchdogs.companyId, issue.companyId),
+          eq(issueWatchdogs.issueId, issue.id),
+          eq(issueWatchdogs.status, "active"),
+        ),
+      )
+      .limit(1)
+      .then((rows) => Boolean(rows[0]));
+    if (armedWatchdog) return true;
 
     return db
       .select({ id: issueRelations.issueId })
