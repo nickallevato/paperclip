@@ -21,6 +21,7 @@ import {
   type CompanyImportTransferCreated,
   type CompanyImportTransferDeclaration,
 } from "@paperclipai/shared/company-import-transfer";
+import { registerCompanyPurgeCommand } from "../company-purge.js";
 import { getTelemetryClient, trackCompanyImported } from "../../telemetry.js";
 import { ApiRequestError, type PaperclipApiClient } from "../../client/http.js";
 import { openUrl } from "../../client/board-auth.js";
@@ -1344,6 +1345,11 @@ function assertDeleteFlags(opts: CompanyDeleteOptions): void {
 
 export function registerCompanyCommands(program: Command): void {
   const company = program.command("company").description("Company operations");
+
+  // Direct-to-Postgres teardown. Lives in its own module because, unlike every
+  // other company command, it does not go through the API — see the header of
+  // company-purge.ts for why the HTTP delete cannot do this job.
+  registerCompanyPurgeCommand(company);
 
   addCommonClientOptions(
     company

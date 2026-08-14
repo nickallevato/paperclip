@@ -256,6 +256,7 @@ pnpm exec paperclipai company import ./company --target new --new-company-name "
 pnpm exec paperclipai company import:preview <company-id> --payload-json '{...}'
 pnpm exec paperclipai company import:apply <company-id> --payload-json '{...}'
 pnpm exec paperclipai company delete <company-id-or-prefix> --yes --confirm <same-id-or-prefix>
+pnpm exec paperclipai company purge <selector...> [--apply --yes --confirm <value>]
 ```
 
 Examples:
@@ -275,6 +276,87 @@ Notes:
   an instance-wide setup command.
 - Deletion is server-gated by `PAPERCLIP_ENABLE_COMPANY_DELETION`.
 - With agent authentication, company deletion is company-scoped. Use the current company ID/prefix (for example via `--company-id` or `PAPERCLIP_COMPANY_ID`), not another company.
+
+### `company purge` — offline hard delete
+
+`company purge` is the direct-to-Postgres counterpart to `company delete`. Use it
+when `company delete` fails, which it does on any company with cost history.
+
+**Why it exists.** The API's `DELETE /api/companies/:id` deletes a hand-written
+list of ~30 tables in a fixed order. That list deletes `heartbeat_runs` before
+`cost_events`, but `cost_events.heartbeat_run_id -> heartbeat_runs` is
+`ON DELETE NO ACTION`, so the transaction aborts with a foreign key violation
+and the company is never removed. Separately, 145 tables carry a `company_id`
+and plugins add more in their own `plugin_*` schemas, so a hand-written list
+cannot stay complete.
+
+`company purge` derives the work from the live catalog instead:
+
+- targets every `BASE TABLE` in every schema with a `company_id` column, so
+  plugin schemas are covered automatically;
+- deletes rows in tables that reference company data but have no `company_id`
+  of their own (`decision_effect_executions`, `status_card_updates`, …) via a
+  join, but only where the FK is `NO ACTION`/`RESTRICT` — `CASCADE` and
+  `SET NULL` are left to Postgres;
+- discovers a working delete order instead of hardcoding one: steps are
+  topologically pre-sorted, and any step that still hits a foreign key
+  violation is rolled back to a savepoint and retried on the next pass.
+
+Foreign keys stay **enabled** for the whole run. Disabling them with
+`session_replication_role = 'replica'` would also disable the ~88 `ON DELETE
+CASCADE` edges and silently orphan rows; keeping Postgres in the loop means a
+successful commit is itself proof that referential integrity held.
+
+```sh
+# Dry run (default): executes every delete, reports counts, then rolls back.
+pnpm exec paperclipai company purge "cs development"
+
+# Purge several companies as one set.
+pnpm exec paperclipai company purge "cs consulting" "cs development" "cs website"
+
+# Commit. Requires all three flags.
+pnpm exec paperclipai company purge CSD --apply --yes --confirm CSD
+```
+
+Options:
+
+| Flag | Meaning |
+| --- | --- |
+| `--apply` | Commit. Without it the transaction is rolled back. |
+| `--yes` | Required with `--apply`. |
+| `--confirm <value>` | Required with `--apply`; must match a target ID, prefix, or name. |
+| `--no-backup` | Skip the pre-purge backup. Not recommended. |
+| `--fk-indexes` | Build temporary indexes on unindexed FK columns first. Only with the server stopped — see below. |
+| `--config <path>` | Config file used to resolve the connection string. |
+| `--json` | Machine-readable result on stdout; progress on stderr. |
+
+Notes:
+
+- **Selectors accept an ID, an issue prefix, or an exact name**, and each must
+  match exactly one company or the command fails.
+- **Purge mutually-referencing companies together.** Preflight refuses to run if
+  a company outside the target set references data inside it, because deleting
+  anyway would strand the outsider's rows. Passing the related companies in one
+  invocation makes those references internal to the set and the check passes.
+- **A dry run is a real rehearsal.** Every `DELETE` executes against live data
+  inside a transaction that is then rolled back, so the reported per-table row
+  counts are exact and a clean dry run proves the purge will commit.
+- **A backup runs first** for any `--apply`, into the configured backup dir with
+  the `paperclip-pre-purge` prefix, unless `--no-backup` is passed.
+- **Run it with the server stopped.** 315 of the schema's 616 foreign keys have
+  no index on the child column, so cascading deletes cost a child-table scan per
+  parent row — `heartbeat_runs` alone is referenced by 39 unindexed columns,
+  three of them on `issue_comments`. Large companies therefore take a long time
+  and hold a long-lived transaction. Stop the service, purge, start it again.
+- **`--fk-indexes` is opt-in and needs the service stopped.** It builds the
+  missing FK indexes first, which turns hours into minutes, but `CREATE INDEX`
+  takes an `ACCESS EXCLUSIVE` lock and Postgres holds every one of those locks
+  until the transaction ends. Against a running server this stalls all writes to
+  the affected tables for the whole purge. Without the flag the purge is slow but
+  takes no exclusive locks.
+- The command talks to Postgres directly using the same connection resolution as
+  `db:backup` (`DATABASE_URL`, then `config.database.connectionString`, then the
+  embedded Postgres port). It does not need the server to be running.
 
 ## Issue Commands
 
