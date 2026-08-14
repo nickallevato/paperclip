@@ -399,29 +399,67 @@ export function agentService(db: Db) {
     return Number(row?.count ?? 0);
   }
 
+  // Whether a row is eligible for orphan reconciliation at all, before any DB lookup. Shared
+  // by the single-row and batched paths so both apply the same grace-window rule.
+  function isReconcilableOrphanCandidate(
+    row: Pick<typeof agents.$inferSelect, "status" | "updatedAt" | "lastHeartbeatAt">,
+    now: Date,
+  ): boolean {
+    if (row.status !== "running") return false;
+    const flagWrittenAt = row.updatedAt ? new Date(row.updatedAt).getTime() : 0;
+    const observedAcrossWindow = now.getTime() - flagWrittenAt >= ORPHAN_RUNNING_RECONCILE_GRACE_MS;
+    return row.lastHeartbeatAt == null || observedAcrossWindow;
+  }
+
+  // Batched form of countBackingRunsForAgent: one round-trip for a whole set of candidate
+  // agents. Used by list() so a company with K running agents does not fire K COUNT queries
+  // on every read (Greptile review of upstream #8352, P2).
+  async function agentIdsWithBackingRuns(agentIds: string[]): Promise<Set<string>> {
+    if (agentIds.length === 0) return new Set();
+    const rows = await db
+      .selectDistinct({ agentId: heartbeatRuns.agentId })
+      .from(heartbeatRuns)
+      .where(
+        and(
+          inArray(heartbeatRuns.agentId, agentIds),
+          inArray(heartbeatRuns.status, ["queued", "running"]),
+        ),
+      );
+    return new Set(rows.map((row) => row.agentId));
+  }
+
   // On-read reconciliation: heal an orphaned `running` flag to `idle` when no run backs it.
   // Returns the (possibly healed) row so the read reflects the reconciled status.
+  //
+  // `backingRunAgentIds`, when supplied by a batched caller, replaces the per-agent COUNT.
+  // A stale set is safe: the UPDATE below re-checks with its own NOT EXISTS guard.
   async function reconcileOrphanedRunningStatus<T extends typeof agents.$inferSelect>(
     row: T,
     now: Date = new Date(),
+    backingRunAgentIds?: ReadonlySet<string>,
   ): Promise<T> {
     if (row.status !== "running") return row;
 
     // Require the orphan to persist past one reconciliation window since the `running` flag
     // was written (row.updatedAt), unless the agent has never finished a heartbeat — that
     // first-run-stuck case is reconciled immediately once we confirm no run backs it.
-    const flagWrittenAt = row.updatedAt ? new Date(row.updatedAt).getTime() : 0;
-    const observedAcrossWindow = now.getTime() - flagWrittenAt >= ORPHAN_RUNNING_RECONCILE_GRACE_MS;
-    if (row.lastHeartbeatAt != null && !observedAcrossWindow) return row;
+    if (!isReconcilableOrphanCandidate(row, now)) return row;
 
-    if ((await countBackingRunsForAgent(row.id)) > 0) return row;
+    const hasBackingRun = backingRunAgentIds
+      ? backingRunAgentIds.has(row.id)
+      : (await countBackingRunsForAgent(row.id)) > 0;
+    if (hasBackingRun) return row;
+
+    // One timestamp for both the row and its audit record, so `agents.updatedAt` and the
+    // activity log's `reconciledAt` match exactly when cross-referenced (Greptile P2).
+    const reconciledAt = new Date();
 
     // Atomic heal: the NOT EXISTS guard makes the flip safe against a run starting between the
-    // count above and this update. If any queued/running run backs the agent at write time the
+    // check above and this update. If any queued/running run backs the agent at write time the
     // row will not match and the `running` flag is left untouched.
     const healed = await db
       .update(agents)
-      .set({ status: "idle", updatedAt: new Date() })
+      .set({ status: "idle", updatedAt: reconciledAt })
       .where(
         and(
           eq(agents.id, row.id),
@@ -447,7 +485,7 @@ export function agentService(db: Db) {
         // No `currentRunId` column exists on agents; runs are tracked in heartbeat_runs.
         priorCurrentRunId: null,
         priorLastHeartbeatAt: row.lastHeartbeatAt ? new Date(row.lastHeartbeatAt).toISOString() : null,
-        reconciledAt: new Date().toISOString(),
+        reconciledAt: reconciledAt.toISOString(),
       },
     });
 
@@ -851,8 +889,15 @@ export function agentService(db: Db) {
         listCompanyAgentRows(companyId),
       ]);
       const hydrated = await hydrateAgentSpend(rows);
+      // Resolve backing runs for every orphan candidate in one query rather than one COUNT
+      // per running agent, then reconcile against that set.
+      const now = new Date();
+      const candidateIds = hydrated
+        .filter((row) => isReconcilableOrphanCandidate(row, now))
+        .map((row) => row.id);
+      const backingRunAgentIds = await agentIdsWithBackingRuns(candidateIds);
       const reconciled = await Promise.all(
-        hydrated.map((row) => reconcileOrphanedRunningStatus(row)),
+        hydrated.map((row) => reconcileOrphanedRunningStatus(row, now, backingRunAgentIds)),
       );
       return normalizeAgentRows(reconciled, allCompanyRows);
     },

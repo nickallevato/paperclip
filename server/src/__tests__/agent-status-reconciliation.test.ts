@@ -53,7 +53,32 @@ function baseAgent(overrides: Record<string, unknown> = {}) {
  */
 function makeDb(opts: { rows: Array<Record<string, unknown>>; backingRunCount: number }) {
   const updates: Array<Record<string, unknown>> = [];
+  // Every read against heartbeat_runs, so a test can assert the list path batches them.
+  const heartbeatRunQueries: string[] = [];
   const db: Record<string, unknown> = {
+    // Batched backing-run lookup used by list(): one query for all candidates.
+    selectDistinct: (_cols?: unknown) => {
+      const q: Record<string, unknown> = {};
+      let table: unknown = null;
+      Object.assign(q, {
+        from: (t: unknown) => {
+          table = t;
+          return q;
+        },
+        where: () => q,
+        then: (resolve: (value: unknown[]) => unknown) => {
+          if (table === heartbeatRuns) {
+            heartbeatRunQueries.push("selectDistinct");
+            const backed = opts.backingRunCount > 0
+              ? opts.rows.map((row) => ({ agentId: row.id }))
+              : [];
+            return Promise.resolve(resolve(backed));
+          }
+          return Promise.resolve(resolve([]));
+        },
+      });
+      return q;
+    },
     select: (_cols?: unknown) => {
       const q: Record<string, unknown> = {};
       let table: unknown = null;
@@ -70,6 +95,7 @@ function makeDb(opts: { rows: Array<Record<string, unknown>>; backingRunCount: n
         then: (resolve: (value: unknown[]) => unknown) => {
           if (table === agents) return Promise.resolve(resolve(opts.rows));
           if (table === heartbeatRuns) {
+            heartbeatRunQueries.push("count");
             return Promise.resolve(resolve([{ count: opts.backingRunCount }]));
           }
           if (table === costEvents) return Promise.resolve(resolve([]));
@@ -95,7 +121,7 @@ function makeDb(opts: { rows: Array<Record<string, unknown>>; backingRunCount: n
       }),
     }),
   };
-  return { db, updates };
+  return { db, updates, heartbeatRunQueries };
 }
 
 beforeEach(() => {
@@ -189,6 +215,54 @@ describe("on-read orphaned running-status reconciliation", () => {
     expect(list).toHaveLength(1);
     expect(list[0]!.status).toBe("idle");
     expect(logActivityMock).toHaveBeenCalledTimes(1);
+  });
+
+  // Greptile P2 on upstream #8352: the list path fired one COUNT per running agent, so a
+  // company with K running agents paid K extra queries on every GET /agents.
+  it("batches the backing-run lookup into one query for the whole list", async () => {
+    const rows = [
+      baseAgent({ id: "aaaaaaaa-1111-4111-8111-111111111111", name: "A" }),
+      baseAgent({ id: "bbbbbbbb-2222-4222-8222-222222222222", name: "B" }),
+      baseAgent({ id: "cccccccc-3333-4333-8333-333333333333", name: "C" }),
+    ];
+    const { db, heartbeatRunQueries } = makeDb({ rows, backingRunCount: 0 });
+    const svc = agentService(db as never);
+
+    const list = await svc.list(COMPANY_ID);
+
+    expect(list.map((a) => a.status)).toEqual(["idle", "idle", "idle"]);
+    // One batched lookup, not one per candidate.
+    expect(heartbeatRunQueries).toEqual(["selectDistinct"]);
+    expect(logActivityMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("leaves list rows alone when the batched lookup finds backing runs", async () => {
+    const rows = [
+      baseAgent({ id: "aaaaaaaa-1111-4111-8111-111111111111", name: "A" }),
+      baseAgent({ id: "bbbbbbbb-2222-4222-8222-222222222222", name: "B" }),
+    ];
+    const { db, heartbeatRunQueries } = makeDb({ rows, backingRunCount: 1 });
+    const svc = agentService(db as never);
+
+    const list = await svc.list(COMPANY_ID);
+
+    expect(list.map((a) => a.status)).toEqual(["running", "running"]);
+    expect(heartbeatRunQueries).toEqual(["selectDistinct"]);
+    expect(logActivityMock).not.toHaveBeenCalled();
+  });
+
+  // Greptile P2 on upstream #8352: agents.updatedAt and the audit row's reconciledAt came
+  // from two separate new Date() calls, so they never matched when cross-referenced.
+  it("stamps the healed row and its audit record with the same timestamp", async () => {
+    const { db, updates } = makeDb({ rows: [baseAgent()], backingRunCount: 0 });
+    const svc = agentService(db as never);
+
+    await svc.getById("11111111-1111-4111-8111-111111111111");
+
+    const healUpdate = updates.find((u) => u.table === agents)!;
+    const updatedAt = (healUpdate.vals as { updatedAt: Date }).updatedAt;
+    const [, input] = logActivityMock.mock.calls[0]!;
+    expect((input.details as { reconciledAt: string }).reconciledAt).toBe(updatedAt.toISOString());
   });
 
   // Regression: the historical orphans named in ATLA-1221 / ATLA-1136 reconcile to idle.
