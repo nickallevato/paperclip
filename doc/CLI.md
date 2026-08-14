@@ -338,6 +338,13 @@ Notes:
   a company outside the target set references data inside it, because deleting
   anyway would strand the outsider's rows. Passing the related companies in one
   invocation makes those references internal to the set and the check passes.
+
+  This covers columns pointing at `companies` other than a row's own
+  `company_id` — currently `company_skills.forked_from_company_id` and
+  `cli_auth_challenges.requested_company_id`, both `ON DELETE SET NULL`. Without
+  the check, purging a company that a surviving company forked a skill from
+  would silently null that provenance instead of failing. Single-column foreign
+  keys only; the schema has no multi-column ones.
 - **A dry run is a real rehearsal.** Every `DELETE` executes against live data
   inside a transaction that is then rolled back, so the reported per-table row
   counts are exact and a clean dry run proves the purge will commit.
