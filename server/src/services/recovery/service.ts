@@ -37,6 +37,7 @@ import { redactCurrentUserText } from "../../log-redaction.js";
 import { redactSensitiveText } from "../../redaction.js";
 import { logActivity } from "../activity-log.js";
 import { publishLiveEvent } from "../live-events.js";
+import { buildHeartbeatRunIssueComment } from "../heartbeat-run-summary.js";
 import { budgetService } from "../budgets.js";
 import { instanceSettingsService } from "../instance-settings.js";
 import { issueRecoveryActionService } from "../issue-recovery-actions.js";
@@ -5624,6 +5625,10 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         errorCode: updated.errorCode ?? null,
         startedAt: updated.startedAt ? new Date(updated.startedAt).toISOString() : null,
         finishedAt: updated.finishedAt ? new Date(updated.finishedAt).toISOString() : null,
+        // Terminal payloads must carry finalText: the plugin session consumer emits a
+        // "done" event whose message is this field, so omitting it turns a successful
+        // run into a completion with no result. This status is always terminal here.
+        finalText: buildHeartbeatRunIssueComment(parseObject(updated.resultJson)),
       },
     });
 
