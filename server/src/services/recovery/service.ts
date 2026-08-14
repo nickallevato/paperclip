@@ -36,6 +36,7 @@ import { isPidAlive, isProcessGroupAlive, terminateLocalService } from "../local
 import { redactCurrentUserText } from "../../log-redaction.js";
 import { redactSensitiveText } from "../../redaction.js";
 import { logActivity } from "../activity-log.js";
+import { publishLiveEvent } from "../live-events.js";
 import { budgetService } from "../budgets.js";
 import { instanceSettingsService } from "../instance-settings.js";
 import { issueRecoveryActionService } from "../issue-recovery-actions.js";
@@ -5600,6 +5601,32 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     }
 
     runningProcesses.delete(run.id);
+
+    // This path writes heartbeat_runs directly instead of going through
+    // heartbeat's setRunStatus, so nothing else announces the transition. Without
+    // this event the browser never learns the run ended: the sidebar and the
+    // dashboard "Active / recent" panel keep rendering it as live until a
+    // remount or window-focus refetch, while the issue itself has already
+    // flipped to done via its own events. Payload is built inline (rather than
+    // reusing buildHeartbeatRunStatusLiveEventPayload) because heartbeat.ts
+    // imports this module — see responsible-user-denial-run-outcomes.ts for the
+    // same pattern.
+    publishLiveEvent({
+      companyId: updated.companyId,
+      type: "heartbeat.run.status",
+      payload: {
+        runId: updated.id,
+        agentId: updated.agentId,
+        status: updated.status,
+        invocationSource: updated.invocationSource,
+        triggerDetail: updated.triggerDetail,
+        error: updated.error ?? null,
+        errorCode: updated.errorCode ?? null,
+        startedAt: updated.startedAt ? new Date(updated.startedAt).toISOString() : null,
+        finishedAt: updated.finishedAt ? new Date(updated.finishedAt).toISOString() : null,
+      },
+    });
+
     // The run update above already committed the terminal status. The audit
     // event is best-effort: if the insert fails, the caller must still treat
     // the run as terminalized and clear the lock in the same sweep. So catch
