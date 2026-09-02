@@ -8732,6 +8732,13 @@ describeEmbeddedPostgres("tool access service", () => {
     expect(second.connectionId).toBe(first.connectionId);
     expect(second.application.status).toBe("draft");
     expect(second.connection.status).toBe("draft");
+    // Recovery restores the identity, not the access. The revived connection
+    // must stay disabled until it is configured and enabled again, so a
+    // removed app cannot silently regain a live tool-access path.
+    expect(second.connection.enabled).toBe(false);
+    const [revivedConnection] = await db.select().from(toolConnections)
+      .where(eq(toolConnections.id, first.connectionId));
+    expect(revivedConnection.enabled).toBe(false);
     await expect(db.select().from(toolApplications)).resolves.toHaveLength(1);
     await expect(db.select().from(toolConnections)).resolves.toHaveLength(1);
   });
