@@ -33,7 +33,6 @@ import {
 } from "./agent-secret-bindings.js";
 import { logActivity } from "./activity-log.js";
 import { normalizeAgentPermissions } from "./agent-permissions.js";
-import { logActivity } from "./activity-log.js";
 import { REDACTED_EVENT_VALUE, sanitizeRecord } from "../redaction.js";
 import {
   assertClaudeOAuthBindingInvariant,
