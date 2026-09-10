@@ -7162,10 +7162,17 @@ export function issueService(db: Db) {
           if (issueData.projectId == null && workspaceSource.projectId) {
             issueData.projectId = workspaceSource.projectId;
           }
-          if (projectWorkspaceId == null && workspaceSource.projectWorkspaceId) {
+          // Workspaces belong to a project, so they can only be inherited when the
+          // new issue lands in the source issue's project. A child that names a
+          // different project (suggested tasks routinely do) would otherwise
+          // inherit a workspace from the parent's project and fail validation.
+          const inheritsSourceProject =
+            (issueData.projectId ?? null) === (workspaceSource.projectId ?? null);
+          if (inheritsSourceProject && projectWorkspaceId == null && workspaceSource.projectWorkspaceId) {
             projectWorkspaceId = workspaceSource.projectWorkspaceId;
           }
           if (
+            inheritsSourceProject &&
             isolatedWorkspacesEnabled &&
             !hasExplicitExecutionWorkspaceOverride &&
             workspaceSource.executionWorkspaceId
