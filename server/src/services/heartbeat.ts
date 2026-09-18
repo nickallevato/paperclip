@@ -529,7 +529,7 @@ import {
 } from "./recovery/review-path-recovery.js";
 import { resolveRequiredSuccessfulRunHandoffOnValidPath } from "./successful-run-handoff-state.js";
 import { taskWatchdogService } from "./task-watchdogs.js";
-import { hasArmedInvokableIssueWatchdog } from "./task-watchdog-scope.js";
+import { hasArmedInvokableIssueWatchdog } from "./task-watchdog-delivery.js";
 import { withAgentStartLock } from "./agent-start-lock.js";
 import {
   evaluateAgentInvokability,
