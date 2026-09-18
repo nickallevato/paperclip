@@ -19,6 +19,7 @@ import {
   createInvalidationBatcher,
 } from "../lib/query-invalidation-batcher";
 import {
+  markRunTerminalInList,
   patchRunStatusInList,
   removeRunFromList,
 } from "../lib/live-runs-cache";
@@ -1177,11 +1178,36 @@ function applyRunLifecycleToCompanyLiveRuns(
     },
   );
 
+  // Scoped live-run lists (for example the dashboard "Agents" panel, keyed
+  // [...liveRuns(companyId), scope, params], and the Agents page) share the base
+  // key as a prefix but are separate cache entries. The exact-key setQueryData
+  // calls below do not reach them, and a handled event does not invalidate
+  // them, so patch them with the same event.
+  const baseKey = queryKeys.liveRuns(companyId);
+  const scopedLists = {
+    queryKey: baseKey,
+    predicate: (query: { queryKey: readonly unknown[] }) =>
+      query.queryKey.length > baseKey.length,
+  };
+
   if (TERMINAL_RUN_STATUSES.has(status)) {
     queryClient.setQueryData(
-      queryKeys.liveRuns(companyId),
+      baseKey,
       (current: LiveRunForIssue[] | undefined) =>
         removeRunFromList(current, runId),
+    );
+    // Scoped lists can pad with recently finished runs (minCount), so keep the
+    // run there and mark it terminal. The card then reads "Finished <n> ago"
+    // instead of "Live now".
+    queryClient.setQueriesData(
+      scopedLists,
+      (current: LiveRunForIssue[] | undefined) =>
+        markRunTerminalInList(
+          current,
+          runId,
+          status,
+          readString(payload.finishedAt) ?? null,
+        ),
     );
     // Always "handled": a terminal run must never be in the live list, so if it
     // wasn't present there is deliberately nothing to refetch (removeRunFromList
@@ -1191,12 +1217,17 @@ function applyRunLifecycleToCompanyLiveRuns(
 
   let present = false;
   queryClient.setQueryData(
-    queryKeys.liveRuns(companyId),
+    baseKey,
     (current: LiveRunForIssue[] | undefined) => {
       const result = patchRunStatusInList(current, runId, status);
       present = result.present;
       return result.next;
     },
+  );
+  queryClient.setQueriesData(
+    scopedLists,
+    (current: LiveRunForIssue[] | undefined) =>
+      patchRunStatusInList(current, runId, status).next,
   );
   return present;
 }

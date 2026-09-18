@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { LiveRunForIssue } from "../api/heartbeats";
-import { patchRunStatusInList, removeRunFromList } from "./live-runs-cache";
+import { markRunTerminalInList, patchRunStatusInList, removeRunFromList } from "./live-runs-cache";
 
 function run(id: string, status: string): LiveRunForIssue {
   return {
@@ -60,5 +60,31 @@ describe("patchRunStatusInList", () => {
     const { next, present } = patchRunStatusInList(undefined, "a", "running");
     expect(present).toBe(false);
     expect(next).toBeUndefined();
+  });
+});
+
+describe("markRunTerminalInList", () => {
+  it("keeps the run and sets the terminal status and finishedAt", () => {
+    const list = [run("a", "running"), run("b", "running")];
+    const next = markRunTerminalInList(list, "a", "succeeded", "2026-07-24T10:00:00.000Z");
+    expect(next).toHaveLength(2);
+    expect(next?.[0]).toEqual({ ...run("a", "running"), status: "succeeded", finishedAt: "2026-07-24T10:00:00.000Z" });
+    expect(next?.[1]).toBe(list[1]); // untouched entry kept by ref
+  });
+
+  it("keeps an existing finishedAt when the event carries none", () => {
+    const list = [{ ...run("a", "running"), finishedAt: "2026-07-24T09:00:00.000Z" }];
+    const next = markRunTerminalInList(list, "a", "failed", null);
+    expect(next?.[0]).toEqual({ ...list[0], status: "failed" });
+  });
+
+  it("returns the same reference when the run isn't present or is already terminal", () => {
+    const list = [{ ...run("a", "succeeded"), finishedAt: "2026-07-24T10:00:00.000Z" }];
+    expect(markRunTerminalInList(list, "zzz", "succeeded", null)).toBe(list);
+    expect(markRunTerminalInList(list, "a", "succeeded", "2026-07-24T10:00:00.000Z")).toBe(list);
+  });
+
+  it("handles undefined", () => {
+    expect(markRunTerminalInList(undefined, "a", "succeeded", null)).toBeUndefined();
   });
 });
