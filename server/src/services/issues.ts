@@ -10567,8 +10567,12 @@ export function issueService(db: Db) {
       // Warm sandbox continuity is runtime bookkeeping, independent of the
       // opt-in UI for creating isolated worktrees. Public updates still obey
       // the feature gate; only the internal shared-workspace binding bypasses it.
+      // An explicit null still goes through: with the gate off it is the only
+      // way to detach a stale execution workspace pin from an issue.
       if (!isolatedWorkspacesEnabled && !options.bindRuntimeSharedWorkspace) {
-        delete issueData.executionWorkspaceId;
+        if (issueData.executionWorkspaceId !== null) {
+          delete issueData.executionWorkspaceId;
+        }
         delete issueData.executionWorkspacePreference;
         delete issueData.executionWorkspaceSettings;
       }

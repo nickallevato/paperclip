@@ -5118,6 +5118,15 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     expect(unchanged?.executionWorkspaceId).toBe(executionWorkspaceId);
   });
 
+  it("clears an execution workspace pin with an explicit null when isolated workspaces are off", async () => {
+    const { issueId, projectId } = await seedPinnedIssue({ isolatedWorkspaces: false });
+
+    const updated = await svc.update(issueId, { executionWorkspaceId: null });
+
+    expect(updated?.projectId).toBe(projectId);
+    expect(updated?.executionWorkspaceId).toBeNull();
+  });
+
   it("uses the target project's own workspaces for a cross-project child instead of inheriting the parent's", async () => {
     const companyId = randomUUID();
     const parentProjectId = randomUUID();
