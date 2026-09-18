@@ -24,6 +24,30 @@ export function removeRunFromList(
 }
 
 /**
+ * Mark a run terminal in place and keep it in the list. Scoped live-run lists
+ * (for example the dashboard panel, which pads with recent runs via `minCount`)
+ * show finished runs, so they patch the run instead of removing it. Returns the
+ * same reference when nothing changed, so a redundant event does not re-render.
+ */
+export function markRunTerminalInList(
+  runs: LiveRunForIssue[] | undefined,
+  runId: string,
+  status: string,
+  finishedAt: string | null,
+): LiveRunForIssue[] | undefined {
+  if (!runs) return runs;
+  let changed = false;
+  const next = runs.map((run) => {
+    if (run.id !== runId) return run;
+    const nextFinishedAt = finishedAt ?? run.finishedAt ?? null;
+    if (run.status === status && run.finishedAt === nextFinishedAt) return run;
+    changed = true;
+    return { ...run, status, finishedAt: nextFinishedAt };
+  });
+  return changed ? next : runs;
+}
+
+/**
  * Update a run's `status` in place. `present` reports whether the run was in the
  * list; when it wasn't, `next` is the original reference and the caller should
  * refetch to pick up the new run.
