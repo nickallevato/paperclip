@@ -19,9 +19,10 @@ import {
   createInvalidationBatcher,
 } from "../lib/query-invalidation-batcher";
 import {
-  markRunTerminalInList,
   patchRunStatusInList,
   removeRunFromList,
+  scopedLiveRunsPadTarget,
+  settleTerminalRunInScopedList,
 } from "../lib/live-runs-cache";
 import type {
   Agent,
@@ -1196,19 +1197,27 @@ function applyRunLifecycleToCompanyLiveRuns(
       (current: LiveRunForIssue[] | undefined) =>
         removeRunFromList(current, runId),
     );
-    // Scoped lists can pad with recently finished runs (minCount), so keep the
-    // run there and mark it terminal. The card then reads "Finished <n> ago"
-    // instead of "Live now".
-    queryClient.setQueriesData(
+    // Scoped lists can pad with recently finished runs (minCount). Mirror the
+    // server: keep the run, marked terminal and after the live runs, only while
+    // it is needed to pad the list. Otherwise remove it, so a finished card
+    // does not hide a live one.
+    const finishedAt = readString(payload.finishedAt) ?? null;
+    for (const [queryKey] of queryClient.getQueriesData<LiveRunForIssue[]>(
       scopedLists,
-      (current: LiveRunForIssue[] | undefined) =>
-        markRunTerminalInList(
-          current,
-          runId,
-          status,
-          readString(payload.finishedAt) ?? null,
-        ),
-    );
+    )) {
+      const padTarget = scopedLiveRunsPadTarget(queryKey);
+      queryClient.setQueryData(
+        queryKey,
+        (current: LiveRunForIssue[] | undefined) =>
+          settleTerminalRunInScopedList(
+            current,
+            runId,
+            status,
+            finishedAt,
+            padTarget,
+          ),
+      );
+    }
     // Always "handled": a terminal run must never be in the live list, so if it
     // wasn't present there is deliberately nothing to refetch (removeRunFromList
     // was a no-op and we must not re-add it).
